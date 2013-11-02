@@ -359,8 +359,8 @@ public class PureJavaSerialPort extends SerialPort {
 	synchronized public void enableReceiveTimeout(int value) throws UnsupportedCommOperationException {
 		if (value < 0)
 			throw new IllegalArgumentException("threshold" + value + " < 0 ");
-		if ((value + 99) / 100 > 255)
-			throw new UnsupportedCommOperationException("threshold" + value + " too large ");
+		if (value > 25500)
+			throw new UnsupportedCommOperationException("threshold" + value + " > 25500 ");
 
 		checkState();
 		synchronized (m_ThresholdTimeoutLock) {
@@ -373,7 +373,7 @@ public class PureJavaSerialPort extends SerialPort {
 	@Override
 	synchronized public void enableReceiveFraming(int arg0) throws UnsupportedCommOperationException {
 		checkState();
-		throw new UnsupportedCommOperationException();
+		throw new UnsupportedCommOperationException("receive framing not supported/implemented");
 	}
 
 	private void thresholdOrTimeoutChanged() { // only call if you hold the lock
@@ -477,22 +477,26 @@ public class PureJavaSerialPort extends SerialPort {
 						throw new UnsupportedCommOperationException("stopBits = " + stopBits);
 				}
 
-				int fi = m_Termios.c_iflag;
-				int fc = m_Termios.c_cflag;
+				int fi = m_Termios.c_iflag & ~(INPCK | ISTRIP);
+				int fc = m_Termios.c_cflag & ~(PARENB | CMSPAR | PARODD);
 				switch (parity) {
 					case SerialPort.PARITY_NONE:
-						fc &= ~PARENB;
-						fi &= ~(INPCK | ISTRIP);
 						break;
 					case SerialPort.PARITY_EVEN:
 						fc |= PARENB;
-						fc &= ~PARODD;
-						fi &= ~(INPCK | ISTRIP);
 						break;
 					case SerialPort.PARITY_ODD:
 						fc |= PARENB;
 						fc |= PARODD;
-						fi &= ~(INPCK | ISTRIP);
+						break;
+					case SerialPort.PARITY_MARK:
+						fc |= PARENB;
+						fc |= CMSPAR;
+						fc |= PARODD;
+						break;
+					case SerialPort.PARITY_SPACE:
+						fc |= PARENB;
+						fc |= CMSPAR;
 						break;
 					case SerialPort.PARITY_MARK:
 						fc |= PARENB;
@@ -523,16 +527,16 @@ public class PureJavaSerialPort extends SerialPort {
 				m_Termios.c_iflag = fi;
 
 				if (tcsetattr(m_FD, TCSANOW, m_Termios) != 0)
-					throw new UnsupportedCommOperationException();
+					throw new UnsupportedCommOperationException("tcsetattr failed");
 
 				// termios(3) tells us, that tcsetattr succeeds if any change
 				// has been made, not all of them. We'll have to read them back
 				// and check the result
 				Termios changed = new Termios();
 				if (tcgetattr(m_FD, changed) == -1)
-					throw new UnsupportedCommOperationException();
+					throw new UnsupportedCommOperationException("tcgetattr failed");
 				if (!changed.equals(m_Termios))
-					throw new UnsupportedCommOperationException();
+					throw new UnsupportedCommOperationException("tcgetattr read back did not match tcsetattr");
 				
 				// finally everything went ok, so we can update our settings
 				m_BaudRate = baudRate;
@@ -571,48 +575,48 @@ public class PureJavaSerialPort extends SerialPort {
 	 * <p>
 	 * Below is a sketch of minimum necessary to perform a read using raw
 	 * JTermios functionality.
-	 *
+	 * 
 	 * <pre>
 	 * <code>
 	 * 		// import the JTermios functionality like this
 	 * 		import jtermios.*;
 	 * 		import static jtermios.JTermios.*;
-	 *
+	 * 
 	 * 		SerialPort port = ...;
-	 *
+	 * 
 	 * 		// cast the port to PureJavaSerialPort to get access to getNativeFileDescriptor
 	 * 		int FD = ((PureJavaSerialPort) port).getNativeFileDescriptor();
-	 *
+	 * 
 	 * 		// timeout and threshold values
 	 * 		int messageLength = 25; // bytes
 	 * 		int timeout = 200; // msec
-	 *
+	 * 
 	 * 		// to initialize timeout and threshold first read current termios
 	 * 		Termios termios = new Termios();
-	 *
+	 * 
 	 * 		if (0 != tcgetattr(FD, termios))
 	 * 			errorHandling();
-	 *
+	 * 
 	 * 		// then set VTIME and VMIN, note VTIME in 1/10th of sec and both max 255
 	 * 		termios.c_cc[VTIME] = (byte) ((timeout+99) / 100);
 	 * 		termios.c_cc[VMIN] = (byte) messageLength;
-	 *
+	 * 
 	 * 		// update termios
 	 * 		if (0 != tcsetattr(FD, TCSANOW, termios))
 	 * 			errorHandling();
-	 *
+	 * 
 	 *      ...
 	 * 		// allocate read buffer
 	 * 		byte[] readBuffer = new byte[messageLength];
 	 *      ...
-	 *
+	 * 
 	 * 		// then perform raw read, not this may block indefinitely
 	 * 		int n = read(FD, readBuffer, messageLength);
 	 * 		if (n < 0)
 	 * 			errorHandling();
 	 * <code>
 	 * </pre>
-	 *
+	 * 
 	 * @return the native OS file descriptor as int
 	 */
 	public int getNativeFileDescriptor() {
@@ -1144,8 +1148,11 @@ public class PureJavaSerialPort extends SerialPort {
 			e.printStackTrace();
 		}
 
-		checkReturnCode(ioctl(m_FD, TIOCMGET, m_ioctl));
-		m_ControlLineStates = m_ioctl[0];
+		int res = ioctl(m_FD, TIOCMGET, m_ioctl);
+		if (res == 0)
+			m_ControlLineStates = m_ioctl[0];
+		else
+			log = log && log(1, "ioctl(TIOCMGET) returned %d, errno %d\n", res, errno());
 
 		String nudgekey = "purejavacomm.usenudgepipe";
 		if (System.getProperty(nudgekey) == null || Boolean.getBoolean(nudgekey)) {
